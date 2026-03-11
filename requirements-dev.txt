@@ -1,0 +1,4 @@
+# 开发/打包用依赖，仅打包时需要
+-r requirements.txt
+pyinstaller>=6.0.0
+Pillow>=10.0.0

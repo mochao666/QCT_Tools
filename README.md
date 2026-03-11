@@ -21,7 +21,7 @@ A small tool that automatically generates QCT files and Comments files from PDT 
 
 ### 下载与使用
 1. **下载工具**  
-   前往 [Releases 页面](链接到你的Releases页面) 下载最新版本的 `QCT_Tools.zip`
+   前往 [Releases 页面]https://github.com/mochao666/QCT_Tools/releases 下载最新版本的 `QCT_Tools.zip`
 
 2. **解压文件**  
    将压缩包解压到任意文件夹  
@@ -37,9 +37,14 @@ A small tool that automatically generates QCT files and Comments files from PDT 
 ### 操作步骤
 
 1. **导入数据**  
-   点击「导入 PDT」按钮，选择你的 PDT Excel 文件，可以选择Event
+   双击运行 QCT_Tools.exe 打开小工具。点击「导入 PDT」按钮，选择你的 PDT Excel 文件，可以选择对应的Event
 
 2. **导出结果**  
    - 点击「导出 QCT」：保存为 QCT 格式文件
    - 点击「导出 Comments」：保存为审阅意见文件
+   - comments 文件会保留F 列（Developers） 和 G 列（Validators），并设为隐藏，在 Excel 里默认不显示。
 
+3. **不同Event叠加**  
+   - 首次导出QCT文件可以选「初版 QCT 」
+   - 在一轮QC完成后，新增Event进行新一轮的QC，可以重新导入 PDT → 将 Event 改为另一个Event → 导出QCT → 选「新增Event」→ 会叠加新的行，同时将原来QCT中的空行删除，仅保留有QC comments的行
+   - 终版QCT：在项目结束后，可以导入QCT → 导出 QCT → 选「终版 QCT 」，会删除QCT中的空行，重新保存。
