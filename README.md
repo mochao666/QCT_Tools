@@ -52,3 +52,6 @@ A small tool that automatically generates QCT files and Comments files from PDT 
    - 首次导出QCT文件可以选「初版 QCT 」
    - 在一轮QC完成后，新增Event进行新一轮的QC，可以重新导入 PDT → 将 Event 改为另一个Event → 导出QCT → 选「新增Event」→ 会叠加新的行，同时将原来QCT中的空行删除，仅保留有QC comments的行
    - 终版QCT：在项目结束后，可以导入QCT → 导出 QCT → 选「终版 QCT 」，会删除QCT中的空行，重新保存。
+     
+4. **权限控制**  
+   - 对于没有权限的文件夹只能导入PDT，无法导出QCT。会显示Permission denied.
