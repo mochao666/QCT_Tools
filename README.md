@@ -3,6 +3,10 @@ A small tool that automatically generates QCT files and Comments files from PDT 
 一个简单易用的 **PDT 文件转 QCT 文件和审阅意见文件的工具**，帮助快速处理文档，无需安装 Python 环境。
 
 ---
+## 📋 项目背景
+在项目运行过程中，程序员需要用到QCT文件，记录QC的findings和解决方案。
+当项目交付时，combined的pdf文件过大不便添加批注时，项目程序员则需要提供审阅意见文件给到项目组，用于添加审阅意见。
+传统方式下，程序员需要手动填写这俩份文档，效率低且不规范。**QCT_Tools**可以读取PDT表格的信息，自动提取表格编号、标题、开发人员、QC人员，大幅减少手动输入的工作。
 
 ## ✨ 功能特点
 
