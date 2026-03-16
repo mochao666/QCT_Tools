@@ -1,10 +1,19 @@
 # -*- coding: utf-8 -*-
-"""PDT 文件读取与清洗，供命令行和 GUI 共用。"""
+"""
+PDT 文件读取与清洗，供命令行（pdt_to_qct）和 GUI（app_gui）共用。
+- 表头从 Excel 第 3 行读取（header=2）
+- 按 config 中的列名或映射匹配列，缺失必选列会抛错
+- 可选列 RTF Combine：若存在则参与导出 Comments 过滤，不存在则默认整列 'Y'
+"""
 
 import pandas as pd
 
 from config import PDT_COLUMNS, PDT_COLUMN_MAPPING
 
+
+# ---------------------------------------------------------------------------
+# 列名匹配与可选列补全
+# ---------------------------------------------------------------------------
 
 def _normalize_col_key(name):
     """表头匹配用：任意空白（含换行）压成单个空格，再转大写。"""
@@ -21,18 +30,38 @@ def _find_column_ignore_case(df, *candidates):
     return None
 
 
+def _ensure_rtf_combine_column(pdt_df: pd.DataFrame, pdt_clean: pd.DataFrame) -> None:
+    """若 PDT 有 RTF Combine 列则加入 pdt_clean，否则添加一列默认 'Y'（兼容无该列的旧 PDT）。"""
+    if "RTF Combine" in pdt_clean.columns:
+        return
+    rtf_col = _find_column_ignore_case(
+        pdt_df, "RTF Combine", (PDT_COLUMN_MAPPING or {}).get("RTF Combine") or "RTF Combine"
+    )
+    if rtf_col and rtf_col in pdt_df.columns:
+        pdt_clean["RTF Combine"] = pdt_df[rtf_col].astype(str).str.strip()
+    else:
+        pdt_clean["RTF Combine"] = "Y"
+
+
+# ---------------------------------------------------------------------------
+# 主入口：读取并清洗 PDT
+# ---------------------------------------------------------------------------
+
 def read_and_clean_pdt(pdt_path: str) -> pd.DataFrame:
     """
-    读取 PDT 文件并提取所需列，形成主词典。
-    若存在 PDT_COLUMN_MAPPING，则按映射从实际列名读取并重命名为逻辑列名。
-    Category 列按「去除首尾空格、忽略大小写」匹配，避免表头不一致导致整列被误填为 Output。
+    读取 PDT 文件并提取所需列，形成统一逻辑列名的 DataFrame。
+    - 若必选列直接用逻辑名匹配不到，则用 PDT_COLUMN_MAPPING 按物理列名匹配并重命名
+    - Category 列特殊处理：常为第一列或名称为 CATEGORY，避免表头不一致导致整列被误填
+    - 最后补全可选列 RTF Combine
     """
-    # PDT 表头从第 3 行开始（Excel 行号 3，pandas header=2）
+    # PDT 表头从第 3 行开始（Excel 行号 3）
     pdt_df = pd.read_excel(pdt_path, header=2)
-    # 统一把表头首尾空格去掉，便于后续匹配（不改原表，只用于找列）
+
     required_cols = [c for c in PDT_COLUMNS if c != "Category"]
     required_ok = all(_find_column_ignore_case(pdt_df, c) is not None for c in required_cols)
+
     if not required_ok:
+        # 走映射分支：按 PDT_COLUMN_MAPPING 的物理列名找列，RTF Combine 不参与必选校验
         missing = [c for c in required_cols if _find_column_ignore_case(pdt_df, c) is None]
         if not PDT_COLUMN_MAPPING:
             raise ValueError(
@@ -40,7 +69,11 @@ def read_and_clean_pdt(pdt_path: str) -> pd.DataFrame:
             )
         physical_cols = list(PDT_COLUMN_MAPPING.values())
         category_physical = PDT_COLUMN_MAPPING.get("Category")
-        required_physical = [c for c in physical_cols if c != category_physical] if category_physical else physical_cols
+        rtf_physical = PDT_COLUMN_MAPPING.get("RTF Combine")
+        required_physical = [
+            c for c in physical_cols
+            if c != category_physical and c != rtf_physical
+        ]
         missing = [c for c in required_physical if _find_column_ignore_case(pdt_df, c) is None]
         if missing:
             raise ValueError(
@@ -57,18 +90,20 @@ def read_and_clean_pdt(pdt_path: str) -> pd.DataFrame:
                     rename_to_logical[actual] = physical_to_logical[phys]
         pdt_clean = pdt_df[cols_to_read].copy()
         pdt_clean = pdt_clean.rename(columns=rename_to_logical)
+        # Category 可能不在 cols_to_read 中，从原表补一列
         category_col = _find_column_ignore_case(pdt_clean, "Category", PDT_COLUMN_MAPPING.get("Category") or "CATEGORY")
         if not category_col and len(pdt_df.columns) > 0:
-            category_col = pdt_df.columns[0]  # PDT 中 Category 常为第一列
+            category_col = pdt_df.columns[0]
         if category_col and category_col not in pdt_clean.columns and category_col in pdt_df.columns:
             pdt_clean[category_col] = pdt_df[category_col].values
         if category_col and category_col in pdt_clean.columns and category_col != "Category":
             pdt_clean = pdt_clean.rename(columns={category_col: "Category"})
         if "Category" not in pdt_clean.columns:
-            pdt_clean["Category"] = ""  # 无 Category 列时视为全空，只统计列存在且非空的行
+            pdt_clean["Category"] = ""
+        _ensure_rtf_combine_column(pdt_df, pdt_clean)
         return pdt_clean
 
-    # 所需列都存在（按忽略大小写+去空格匹配）
+    # 所需列都存在（按逻辑名忽略大小写匹配）
     cols = []
     for c in PDT_COLUMNS:
         if c == "Category":
@@ -80,7 +115,7 @@ def read_and_clean_pdt(pdt_path: str) -> pd.DataFrame:
         pdt_df, "Category", PDT_COLUMN_MAPPING.get("Category") if PDT_COLUMN_MAPPING else None, "CATEGORY"
     )
     if not category_col and len(pdt_df.columns) > 0:
-        category_col = pdt_df.columns[0]  # PDT 中 Category 是第一列
+        category_col = pdt_df.columns[0]
     if category_col:
         if category_col not in cols:
             cols.append(category_col)
@@ -88,8 +123,8 @@ def read_and_clean_pdt(pdt_path: str) -> pd.DataFrame:
     if category_col and category_col != "Category":
         pdt_clean = pdt_clean.rename(columns={category_col: "Category"})
     if "Category" not in pdt_clean.columns:
-        pdt_clean["Category"] = ""  # 无 Category 列时视为全空，只统计列存在且非空的行
-    # 统一成逻辑列名：对非 Category 的列，若实际列名与逻辑名不同则重命名（按 config 映射或忽略大小写）
+        pdt_clean["Category"] = ""
+    # 统一成逻辑列名（与 config 中名称一致）
     rename_map = {}
     for logical in PDT_COLUMNS:
         if logical == "Category":
@@ -99,4 +134,5 @@ def read_and_clean_pdt(pdt_path: str) -> pd.DataFrame:
             rename_map[actual] = logical
     if rename_map:
         pdt_clean = pdt_clean.rename(columns=rename_map)
+    _ensure_rtf_combine_column(pdt_df, pdt_clean)
     return pdt_clean

@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-QCT 小工具 GUI：导入 PDT / 导入 QCT → 选择 Event（整份 QCT 共用）→ 导出 QCT / 导出 Comments。
-导出 QCT 时，两个 Sheet 的第一列自动填充为当前选择的 Event。
+QCT 小工具 GUI：导入 PDT / 导入 QCT → 选择 Event → 导出 QCT / 导出 Comments。
+- 导出 QCT 时，两 Sheet 第一列（Event）使用当前选择的 Event。
+- 新增 Event：可将当前数据追加到已有 QCT，并统一使用当前选择的 Event。
 """
 
 import os
@@ -10,7 +11,9 @@ from tkinter import ttk, filedialog, messagebox
 
 from pdt_reader import read_and_clean_pdt
 
+# ---------------------------------------------------------------------------
 # 界面配色（微软风格）
+# ---------------------------------------------------------------------------
 COLORS = {
     "primary": "#0078d4",      # 微软蓝 - 主按钮（导入）
     "secondary": "#5e5e5e",    # 中灰色 - 次要
@@ -23,6 +26,7 @@ COLORS = {
     "text_primary": "#323130", # 主文字
     "text_secondary": "#605e5c",  # 次要文字
 }
+
 from qct_data import (
     build_qct_rows_from_pdt,
     read_qct_workbook,
@@ -30,8 +34,13 @@ from qct_data import (
     write_comments_workbook,
     EVENT_OPTIONS_LIST,
     EDITABLE_COL_QC_DESC,
+    EVENT_COL_INDEX,
 )
 
+
+# ---------------------------------------------------------------------------
+# 主应用类
+# ---------------------------------------------------------------------------
 
 class QCTToolApp:
     def __init__(self):
@@ -48,6 +57,7 @@ class QCTToolApp:
 
         self._build_ui()
 
+    # ---------- UI 构建 ----------
     def _build_ui(self):
         style = ttk.Style()
         try:
@@ -63,6 +73,9 @@ class QCTToolApp:
         # 弹窗内按钮：次要灰
         style.configure("Dialog.TButton", background=COLORS["secondary"], foreground="white")
         style.map("Dialog.TButton", background=[("active", "#4a4a4a")], foreground=[("active", "white")])
+        # Add Event 按钮：与导入按钮同色（微软蓝）
+        style.configure("AddEvent.TButton", background=COLORS["primary"], foreground="white")
+        style.map("AddEvent.TButton", background=[("active", "#106ebe")], foreground=[("active", "white")])
         # 框架与标签
         style.configure("TFrame", background=COLORS["background"])
         style.configure("TLabel", background=COLORS["background"], foreground=COLORS["text_primary"])
@@ -80,16 +93,104 @@ class QCTToolApp:
         self._status = ttk.Label(top, text="请先导入 PDT 文件", foreground=COLORS["text_secondary"])
         self._status.pack(fill=tk.X, pady=(8, 0), anchor=tk.W)
 
-        # Event 选择区（卡片样式）
+        # Event 选择区（卡片样式）：下拉框 + Add Event 按钮（可自定义添加 Event）
         edit_frame = ttk.LabelFrame(self.root, text="Event（导出 QCT 时将填充到两个 Sheet 的第一列）", padding=10)
         edit_frame.pack(fill=tk.X, padx=10, pady=10)
         ttk.Label(edit_frame, text="Event:").grid(row=0, column=0, sticky=tk.W, pady=2)
+        event_row = ttk.Frame(edit_frame)
+        event_row.grid(row=1, column=0, sticky=tk.W, pady=2)
         self._event_var = tk.StringVar(value="")
         self._combo_event = ttk.Combobox(
-            edit_frame, textvariable=self._event_var, width=18,
+            event_row, textvariable=self._event_var, width=18,
             values=EVENT_OPTIONS_LIST, state="readonly",
         )
-        self._combo_event.grid(row=1, column=0, sticky=tk.W, pady=2)
+        self._combo_event.pack(side=tk.LEFT)
+        ttk.Button(event_row, text="Add Event", command=self._add_event, width=10, style="AddEvent.TButton").pack(side=tk.LEFT, padx=(8, 0))
+
+    # ---------- Event 相关：添加/输入 ----------
+    def _ask_add_event_string(self):
+        """弹出较大尺寸的输入框，标题「添加 Event」，提示「可在此输入新的Event」。返回输入的字符串或 None。"""
+        result = [None]
+
+        def on_ok():
+            result[0] = entry.get().strip() if entry.get() else ""
+            dlg.destroy()
+
+        def on_cancel():
+            dlg.destroy()
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("添加 Event")
+        dlg.geometry("420x140")
+        dlg.resizable(True, False)
+        dlg.configure(bg=COLORS["background"])
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        f = ttk.Frame(dlg, padding=20)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(f, text="可在此输入新的Event", font=("", 10)).pack(anchor=tk.W, pady=(0, 8))
+        entry = ttk.Entry(f, width=42, font=("", 11))
+        entry.pack(fill=tk.X, pady=(0, 16), ipady=4)
+        entry.focus_set()
+        btn_f = ttk.Frame(f)
+        btn_f.pack(fill=tk.X)
+        ttk.Button(btn_f, text="确定", command=on_ok, style="Import.TButton", width=8).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_f, text="取消", command=on_cancel, style="Dialog.TButton", width=8).pack(side=tk.LEFT)
+
+        dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+        entry.bind("<Return>", lambda e: on_ok())
+        self.root.wait_window(dlg)
+        return result[0]
+
+    def _add_event(self):
+        """点击 Add Event 时弹出输入框，添加新 Event 并加入下拉列表、并选中。"""
+        new_event = self._ask_add_event_string()
+        if not new_event or not new_event.strip():
+            return
+        new_event = new_event.strip()
+        if new_event in EVENT_OPTIONS_LIST:
+            self._event_var.set(new_event)
+            self._combo_event["values"] = list(EVENT_OPTIONS_LIST)
+            messagebox.showinfo("添加 Event", f"「{new_event}」已在列表中，已为您选中。", parent=self.root)
+            return
+        EVENT_OPTIONS_LIST.append(new_event)
+        self._combo_event["values"] = list(EVENT_OPTIONS_LIST)
+        self._event_var.set(new_event)
+        messagebox.showinfo("添加 Event", f"已添加「{new_event}」并选中。导出 QCT 时 List 表会包含该选项。", parent=self.root)
+
+    # ---------- 导入：PDT / QCT ----------
+    def _check_pdt_permission(self, path):
+        """检查是否有访问该文件夹及编辑该 PDT 的权限。返回 (True, None) 或 (False, 错误信息)。"""
+        try:
+            dir_path = os.path.dirname(path)
+            if not dir_path or not os.path.isdir(dir_path):
+                return False, "所在文件夹不存在或无法访问。"
+            try:
+                os.listdir(dir_path)
+            except PermissionError:
+                return False, "没有访问该文件夹的权限。"
+            except OSError as e:
+                return False, f"无法访问该文件夹：{e}"
+            if not os.path.isfile(path):
+                return False, "该 PDT 文件不存在。"
+            try:
+                with open(path, "rb") as f:
+                    f.read(1)
+            except PermissionError:
+                return False, "没有读取该 PDT 文件的权限。"
+            except OSError as e:
+                return False, f"无法读取该文件：{e}"
+            try:
+                with open(path, "r+b") as f:
+                    pass
+            except PermissionError:
+                return False, "没有编辑该 PDT 文件的权限，无法导入。"
+            except OSError as e:
+                return False, f"无法编辑该文件：{e}"
+            return True, None
+        except Exception as e:
+            return False, str(e)
 
     def _import_pdt(self):
         path = filedialog.askopenfilename(
@@ -97,6 +198,10 @@ class QCTToolApp:
             filetypes=[("Excel", "*.xlsx *.xls"), ("All", "*.*")],
         )
         if not path:
+            return
+        ok, err = self._check_pdt_permission(path)
+        if not ok:
+            messagebox.showerror("权限不足", err)
             return
         try:
             pdt_df = read_and_clean_pdt(path)
@@ -130,6 +235,7 @@ class QCTToolApp:
         except Exception as e:
             messagebox.showerror("导入 QCT 失败", str(e))
 
+    # ---------- 导出：默认路径与文件名 ----------
     def _default_export_name(self, suffix):
         """导出默认文件名：有 QCT 路径时用 QCT 文件名（仅 QCT 导出），否则用 PDT 路径推导。"""
         if suffix == "QCT" and self._qct_path:
@@ -151,6 +257,7 @@ class QCTToolApp:
             return os.path.dirname(self._pdt_path)
         return None
 
+    # ---------- 导出 QCT：方式选择与执行 ----------
     def _ask_export_qct_mode(self):
         """导出 QCT 时选择：初版QCT、新增Event 或 终版QCT。返回 'initial'、'append' 或 'final'。"""
         choice = [None]
@@ -197,7 +304,16 @@ class QCTToolApp:
             adam_to_write = [r for r in self.adam_tfl_rows if len(r) > EDITABLE_COL_QC_DESC and (r[EDITABLE_COL_QC_DESC] or "").strip()]
             write_mode = "append"
         if export_mode == "append":
-            # 新增 Event：先选择要叠加的已有 QCT 文件，读入后与当前数据合并再保存
+            # 新增 Event：当前要追加的行统一使用界面所选 Event，再与已有 QCT 合并
+            current_event = self._event_var.get().strip()
+            for row in self.sdtm_rows:
+                while len(row) <= EVENT_COL_INDEX:
+                    row.append("")
+                row[EVENT_COL_INDEX] = current_event
+            for row in self.adam_tfl_rows:
+                while len(row) <= EVENT_COL_INDEX:
+                    row.append("")
+                row[EVENT_COL_INDEX] = current_event
             initialdir = self._default_export_dir(prefer_qct=True)
             merge_path = filedialog.askopenfilename(
                 title="选择要叠加的 QCT 文件（当前数据将追加到该文件）",
@@ -243,6 +359,7 @@ class QCTToolApp:
         except Exception as e:
             messagebox.showerror("导出失败", str(e))
 
+    # ---------- 导出 Comments ----------
     def _export_comments(self):
         if not self.sdtm_rows and not self.adam_tfl_rows:
             messagebox.showwarning("提示", "请先导入 PDT 文件后再导出。")

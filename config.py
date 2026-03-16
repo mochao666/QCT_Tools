@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
-"""PDT 与 QCT 列名、Sheet 名等配置。"""
+"""
+PDT 与 QCT 列名、Sheet 名等配置。
+修改本文件可适配不同模板的 PDT/QCT 表头。
+"""
 
-# PDT 文件中需要提取的列（逻辑名，用于程序内部）
+# ---------------------------------------------------------------------------
+# PDT 列配置
+# ---------------------------------------------------------------------------
+# 必选列（逻辑名）：程序从 PDT 中按这些名字或 PDT_COLUMN_MAPPING 匹配列
 PDT_COLUMNS = [
     "Output Type",
     "Output Reference",
@@ -12,27 +18,33 @@ PDT_COLUMNS = [
     "Category",
 ]
 
-# PDT 实际列名映射（若 Excel 表头与上不同，在此配置：逻辑名 -> 实际列名）
-# 当前按 PDT_Template.xlsx 表头：OUTTYPE, OUTREF, OUTTITLE, USERDEV, USERQC, STATDATE, CATEGORY
+# 逻辑名 -> 实际表头名（匹配时忽略大小写、换行视为空格）
+# 若 PDT 表头与逻辑名不同（如旧模板 "OUTTYPE"），在此配置映射
+# RTF Combine 为可选列：存在时导出 Comments 仅保留该列为 'Y' 的行
 PDT_COLUMN_MAPPING = {
-    "Output Type": "OUTTYPE",
-    "Output Reference": "OUTREF",
-    "Title": "OUTTITLE",
-    "Developers": "USERDEV",
-    "Validators": "USERQC",
-    "Date Checked by Trial Statistician": "STATDATE",
-    "Category": "CATEGORY",
+    "Output Type": "Output Type",
+    "Output Reference": "Output Reference",
+    "Title": "Title",
+    "Developers": "Developers",
+    "Validators": "Validators",
+    "Date Checked by Trial Statistician": "Validation Date",
+    "Category": "Category",
+    "RTF Combine": "RTF Combine",
 }
 
-# QCT 两个 Sheet 的名称
+# ---------------------------------------------------------------------------
+# QCT Sheet 名称与输出类型
+# ---------------------------------------------------------------------------
 SHEET_SDTM = "SDTM(aCRF, SPEC and Coding)"
 SHEET_ADAM_TFL = "ADaM(SPEC and Coding) and TFL"
 
-# Output Type 取值：用于判断写入哪个 Sheet
+# Output Type 为 SDTM 时写入第一个 Sheet，否则写入第二个 Sheet
 OUTPUT_TYPE_SDTM = "SDTM"
 
-# 各 Sheet 的表头及与 PDT 的对应关系（9 列）
-# 键为 QCT 列名，值为 PDT 列名（None 表示该列留空）
+# ---------------------------------------------------------------------------
+# QCT 表头与 PDT 列对应关系（10 列）
+# 每项为 (QCT 列名, PDT 列名)，PDT 列名为 None 表示该列留空由用户填写
+# ---------------------------------------------------------------------------
 QCT_HEADERS_SDTM = [
     ("SDTM Datasets", "Output Reference"),
     ("QC checklist-index", "Title"),
@@ -41,8 +53,9 @@ QCT_HEADERS_SDTM = [
     ("QC programmer Name", "Validators"),
     ("Person Responsible for Resolution if Findings", "Developers"),
     ("Date of Resolved if Findings", None),
+    ("Resolution Details", None),
     ("Final Status if Findings", None),
-    ("Specify Notes (If Final Status=\"Followup\")", None),
+    ("Special Notes", None),
 ]
 
 QCT_HEADERS_ADAM_TFL = [
@@ -53,6 +66,7 @@ QCT_HEADERS_ADAM_TFL = [
     ("QC programmer Name", "Validators"),
     ("Person Responsible for Resolution if Findings", "Developers"),
     ("Date of Resolved if Findings", None),
+    ("Resolution Details", None),
     ("Final Status if Findings", None),
-    ("Specify Notes (If Final Status=\"Followup\")", None),
+    ("Special Notes", None),
 ]

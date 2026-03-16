@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-"""从 PDT 构建 QCT 内存数据（按 Sheet 的行列表），并支持写入 Excel。"""
+"""
+从 PDT 构建 QCT 内存数据（按 Sheet 的行列表），并支持读取/写入 QCT Excel、导出 Comments。
+行结构：前 10 列为 QCT 内容，第 11 列 Event，第 12 列 Category，第 13 列 RTF Combine（可选，用于 Comments 过滤）。
+"""
 
 from datetime import datetime
 
 import pandas as pd
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import PatternFill, Alignment, Font
+from openpyxl.styles import PatternFill, Alignment, Font, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
@@ -18,7 +21,12 @@ from config import (
 )
 
 
+# ---------------------------------------------------------------------------
+# 工具函数：单元格取值与 PDT 行 -> QCT 行转换
+# ---------------------------------------------------------------------------
+
 def _normalize_cell_value(val):
+    """将单元格值转为字符串；空/NaN 为 ''，日期格式化为 YYYY-MM-DD。"""
     if pd.isna(val):
         return ""
     if isinstance(val, (pd.Timestamp, datetime)):
@@ -27,27 +35,31 @@ def _normalize_cell_value(val):
 
 
 def _row_to_qct_values(headers_config, row: pd.Series) -> list:
-    """根据 (QCT列名, PDT列名) 配置和 PDT 的一行，生成 QCT 该行各列的值（列表）。"""
+    """根据 (QCT列名, PDT列名) 配置和 PDT 的一行，生成 QCT 该行 10 列的值列表。"""
     values = []
     for qct_col, pdt_col in headers_config:
         if pdt_col is None:
             values.append("")
         else:
-            val = _normalize_cell_value(row.get(pdt_col))
-            values.append(val)
+            values.append(_normalize_cell_value(row.get(pdt_col)))
     return values
 
 
-# 行数据：前 9 列为 QCT 表内容，第 10 列为 Event，第 11 列为 Category（仅用于 Comments 过滤）。按行区分 Event 以支持「在已有 QCT 上增加行」。
-QCT_NUM_COLUMNS = 9
-EVENT_COL_INDEX = 9
-CATEGORY_COL_INDEX = 10
+# 行内列索引：前 10 列为 QCT，11=Event，12=Category，13=RTF Combine（导出 Comments 时仅保留为 'Y' 的行）
+QCT_NUM_COLUMNS = 10
+EVENT_COL_INDEX = 10
+CATEGORY_COL_INDEX = 11
+RTF_COMBINE_COL_INDEX = 12
 
+
+# ---------------------------------------------------------------------------
+# 从 PDT 构建内存行数据
+# ---------------------------------------------------------------------------
 
 def build_qct_rows_from_pdt(pdt_df: pd.DataFrame, event_value: str = ""):
     """
     从已清洗的 PDT DataFrame 生成两个 Sheet 的行数据。
-    每行末尾带 Event（索引 9）、Category（索引 10）；event_value 用于新生成或增加行时标记该批行的 Event。
+    每行末尾带 Event（索引 10）、Category（索引 11）；event_value 用于新生成或增加行时标记该批行的 Event。
     返回 (sdtm_rows, adam_tfl_rows)，每个为 list of list，顺序与 QCT_HEADERS_* 一致 + Event + Category。
     """
     sdtm_rows = []
@@ -61,26 +73,23 @@ def build_qct_rows_from_pdt(pdt_df: pd.DataFrame, event_value: str = ""):
         # 将 "nan"、"None" 等视为空；仅统计并加入 Category 非空的行
         if not category or category.upper() in ("NAN", "NONE", "NAT"):
             continue
+        rtf_combine = str(row.get("RTF Combine", "Y")).strip().upper()
         if output_type == OUTPUT_TYPE_SDTM:
-            sdtm_rows.append(_row_to_qct_values(QCT_HEADERS_SDTM, row) + [event_value, category])
+            sdtm_rows.append(_row_to_qct_values(QCT_HEADERS_SDTM, row) + [event_value, category, rtf_combine])
         else:
-            adam_tfl_rows.append(_row_to_qct_values(QCT_HEADERS_ADAM_TFL, row) + [event_value, category])
+            adam_tfl_rows.append(_row_to_qct_values(QCT_HEADERS_ADAM_TFL, row) + [event_value, category, rtf_combine])
     return sdtm_rows, adam_tfl_rows
 
 
-def get_sdtm_headers():
-    return [h[0] for h in QCT_HEADERS_SDTM]
+# 可编辑列在 QCT 行中的索引（0-based），供 GUI 过滤与编辑
+EDITABLE_COL_QC_DESC = 2   # QC results description
+EDITABLE_COL_DATE_OF_QC = 3
+EDITABLE_COL_FOLLOWUP_NOTES = 9
 
 
-def get_adam_tfl_headers():
-    return [h[0] for h in QCT_HEADERS_ADAM_TFL]
-
-
-# 可编辑列在表头中的索引（0-based），供 GUI 使用
-EDITABLE_COL_QC_DESC = 2   # QC results description (e.g. details of findings or passed)
-EDITABLE_COL_DATE_OF_QC = 3   # Date of QC
-EDITABLE_COL_FOLLOWUP_NOTES = 8   # Specify Notes (If Final Status="Followup")
-
+# ---------------------------------------------------------------------------
+# 从 QCT Excel 读取行数据
+# ---------------------------------------------------------------------------
 
 def _openpyxl_cell_value(cell):
     """从 openpyxl 单元格取值，空为 ''，日期格式化为 Y-m-d。"""
@@ -104,39 +113,65 @@ def read_qct_workbook(path: str):
 
     first_event = ""
 
-    def sheet_to_rows(sheet_name, out_list):
+    def sheet_to_rows_adam(sheet_name, out_list):
+        """ADaM：A=Event, B-K=10 列 QCT"""
         nonlocal first_event
         if sheet_name not in wb.sheetnames:
             return
         ws = wb[sheet_name]
-        for row_cells in ws.iter_rows(min_row=2, max_col=10):  # A=Event, B-J=9 列 QCT
+        for row_cells in ws.iter_rows(min_row=2, max_col=11):
             values = [_openpyxl_cell_value(c) for c in row_cells]
-            if len(values) < 10:
-                values.extend([""] * (10 - len(values)))
+            if len(values) < 11:
+                values.extend([""] * (11 - len(values)))
             if not first_event and values[0]:
                 first_event = str(values[0]).strip()
-            qct_vals = values[1:10]
-            if len(qct_vals) < 9:
-                qct_vals.extend([""] * (9 - len(qct_vals)))
-            qct_vals = qct_vals[:9]
+            qct_vals = values[1:11]
+            if len(qct_vals) < 10:
+                qct_vals.extend([""] * (10 - len(qct_vals)))
+            qct_vals = qct_vals[:10]
             qc_desc = (qct_vals[EDITABLE_COL_QC_DESC] or "").strip()
             if not qc_desc:
                 continue
             event_val = str(values[0]).strip() if values[0] else ""
             out_list.append(qct_vals + [event_val, "Output"])
 
-    sheet_to_rows(SHEET_SDTM, sdtm_rows)
-    sheet_to_rows(SHEET_ADAM_TFL, adam_tfl_rows)
+    def sheet_to_rows_sdtm(sheet_name, out_list):
+        """SDTM：A=Event, B-J=9 列 QCT（无 C 列），读入后补空列以与内部 10 列一致"""
+        nonlocal first_event
+        if sheet_name not in wb.sheetnames:
+            return
+        ws = wb[sheet_name]
+        for row_cells in ws.iter_rows(min_row=2, max_col=10):
+            values = [_openpyxl_cell_value(c) for c in row_cells]
+            if len(values) < 10:
+                values.extend([""] * (10 - len(values)))
+            if not first_event and values[0]:
+                first_event = str(values[0]).strip()
+            # 9 列 → 在索引 1 插入空列（QC checklist-index）得到 10 列
+            qct_vals = values[1:2] + [""] + values[2:10]
+            if len(qct_vals) < 10:
+                qct_vals.extend([""] * (10 - len(qct_vals)))
+            qct_vals = qct_vals[:10]
+            qc_desc = (qct_vals[EDITABLE_COL_QC_DESC] or "").strip()
+            if not qc_desc:
+                continue
+            event_val = str(values[0]).strip() if values[0] else ""
+            out_list.append(qct_vals + [event_val, "Output"])
+
+    sheet_to_rows_sdtm(SHEET_SDTM, sdtm_rows)
+    sheet_to_rows_adam(SHEET_ADAM_TFL, adam_tfl_rows)
     return sdtm_rows, adam_tfl_rows, first_event
 
 
-# 导出 Comments 表头：第一列 Event（单行），前 5 列「中文\n英文」两行，最后两列 Developers、Validators 单行
+# ---------------------------------------------------------------------------
+# 导出 Comments 工作簿
+# ---------------------------------------------------------------------------
+# 表头：Event + 5 列中英双行 + Developers、Validators（G/H 列隐藏）
 COMMENTS_HEADERS_ZH = ["表格编号", "标题", "问题描述", "记录日期", "记录人"]
 COMMENTS_HEADERS_EN = ["TFL No.", "TFL Title", "Issue Description", "Date Issued", "Issued by"]
 COMMENTS_HEADERS_COMBINED = ["Event"] + [f"{zh}\n{en}" for zh, en in zip(COMMENTS_HEADERS_ZH, COMMENTS_HEADERS_EN)] + ["Developers", "Validators"]
-# QCT 行中 Developers / Validators 对应列（Person Responsible for Resolution、QC programmer Name）
-DEVELOPERS_COL_INDEX = 5
-VALIDATORS_COL_INDEX = 4
+DEVELOPERS_COL_INDEX = 5   # Person Responsible for Resolution
+VALIDATORS_COL_INDEX = 4   # QC programmer Name
 
 
 def write_comments_workbook(sdtm_rows: list, adam_tfl_rows: list, path: str, event_value: str = ""):
@@ -159,13 +194,15 @@ def write_comments_workbook(sdtm_rows: list, adam_tfl_rows: list, path: str, eve
     # 隐藏 G/H 列（Developers、Validators），数据仍保留
     ws.column_dimensions[get_column_letter(7)].hidden = True
     ws.column_dimensions[get_column_letter(8)].hidden = True
-    # 只保留 Category=Output 的记录；A=Event 使用 event_value（导入 PDT 时选择的 Event）自动填充
+    # 只保留 Category=Output 的记录；若行带 RTF Combine（来自 PDT），仅保留为 'Y' 的行；A=Event 使用 event_value 自动填充
     def emit_output_rows(rows):
         for row in rows:
             if len(row) <= CATEGORY_COL_INDEX:
                 continue
             cat = str(row[CATEGORY_COL_INDEX]).strip().upper()
             if cat != "OUTPUT":
+                continue
+            if len(row) > RTF_COMBINE_COL_INDEX and str(row[RTF_COMBINE_COL_INDEX]).strip().upper() != "Y":
                 continue
             developers = row[DEVELOPERS_COL_INDEX] if len(row) > DEVELOPERS_COL_INDEX else ""
             validators = row[VALIDATORS_COL_INDEX] if len(row) > VALIDATORS_COL_INDEX else ""
@@ -175,19 +212,21 @@ def write_comments_workbook(sdtm_rows: list, adam_tfl_rows: list, path: str, eve
     wb.save(path)
 
 
-# QCT 两个 Sheet：第一列为 Event（整份文件同一值），后 9 列为 QCT 内容；列宽
-QCT_COL_WIDTHS = (12, 15, 60, 45, 15, 15, 28, 15, 15, 45)
-# 表头第一行（仅 9 列 QCT；导出时在首列前插入 Event）
+# ---------------------------------------------------------------------------
+# QCT 工作簿样式与表头常量（写入 Excel 时使用）
+# ---------------------------------------------------------------------------
+QCT_COL_WIDTHS = (12, 15, 60, 45, 15, 15, 20, 15, 32, 15, 28)       # ADaM：Event + 10 列
+QCT_COL_WIDTHS_SDTM = (12, 15, 45, 15, 15, 20, 15, 32, 15, 28)     # SDTM：Event + 9 列（无 C 列）
 QCT_HEADER_ROW_SDTM = [
     "SDTM Datasets",
-    "QC checklist-index",
     "QC results description\n(e.g. details of findings or passed)",
     "Date of QC",
     "QC programmer\nName",
-    "Person Responsible\nfor Resolution if\nFindings",
+    "Person Responsible for Resolution if Findings",
     "Date of Resolved\nif Findings",
+    "Resolution\nDetails",
     "Final Status if\nFindings",
-    'Specify Notes (If\nFinal Status="Followup")',
+    "Special Notes",
 ]
 QCT_HEADER_ROW_ADAM = [
     "ADaM Dataset/\nTFL Number",
@@ -195,22 +234,32 @@ QCT_HEADER_ROW_ADAM = [
     "QC results description\n(e.g. details of findings or passed)",
     "Date of QC",
     "QC programmer\nName",
-    "Person Responsible\nfor Resolution if\nFindings",
+    "Person Responsible for Resolution if Findings",
     "Date of Resolved\nif Findings",
+    "Resolution\nDetails",
     "Final Status if\nFindings",
-    'Specify Notes (If\nFinal Status="Followup")',
+    "Special Notes",
 ]
-FILL_LIGHT_BLUE = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
-FILL_LIGHT_GREEN = PatternFill(start_color="D8E4BC", end_color="D8E4BC", fill_type="solid")
+FILL_LIGHT_BLUE = PatternFill(start_color="B8DCF9", end_color="B8DCF9", fill_type="solid")
+FILL_LIGHT_GREEN = PatternFill(start_color="A8E0A8", end_color="A8E0A8", fill_type="solid")
 HEADER_FONT = Font(bold=True)
-HEADER_ALIGN = Alignment(wrap_text=True)
-# List Sheet 表头（Final Status for Findings 单元格内换行）
+HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
+THIN_BLACK_BORDER = Border(
+    left=Side(style="thin", color="000000"),
+    right=Side(style="thin", color="000000"),
+    top=Side(style="thin", color="000000"),
+    bottom=Side(style="thin", color="000000"),
+)
+HEADER_BORDER = THIN_BLACK_BORDER
+
+# List 表：Event 下拉选项、Final Status 选项、User List（从 PDT Users 表读）
 SHEET_LIST_NAME = "List"
 LIST_HEADERS = ["Event", "Final Status for\nFindings", "User List"]
 LIST_COL_WIDTHS = (15, 22, 25)
-# Event 选项，展示在 List 表 A 列
-EVENT_OPTIONS_LIST = ["CSR", "Dryrun", "IA", "DMC", "EOP2"]
-# Final Status for Findings 三行选项，展示在 List 表 B 列，并供 SDTM/ADaM 的 Final Status if Findings 下拉引用
+EVENT_OPTIONS_LIST = [
+    "CSR", "Dryrun", "IA", "DMC", "EOP2",
+    "CSR1", "CSR2", "Dryrun1", "Dryrun2", "IA1", "IA2", "DMC1", "DMC2",
+]
 FINAL_STATUS_OPTIONS_LIST = ["Open", "Closed", "Follow up"]
 
 
@@ -228,7 +277,8 @@ def _read_users_from_pdt(pdt_path: str):
         if ws is None:
             return []
         users = []
-        for row in ws.iter_rows(min_col=1, max_col=1, min_row=1):
+        # 从第 2 行读起，跳过第一行表头（如 "User"），避免出现在 List 表第二行
+        for row in ws.iter_rows(min_col=1, max_col=1, min_row=2):
             val = row[0].value
             if val is not None and str(val).strip():
                 users.append(str(val).strip())
@@ -237,18 +287,32 @@ def _read_users_from_pdt(pdt_path: str):
         return []
 
 
+# ---------------------------------------------------------------------------
+# 写入 QCT 工作簿（两 Sheet + List + 数据验证）
+# ---------------------------------------------------------------------------
+
 def _set_qct_header_row(ws, headers: list):
-    """设置 QCT 表头第一行：文案、换行、加粗、浅蓝/浅绿背景（C 列即 QC checklist-index 浅绿，其余浅蓝）。"""
+    """设置 QCT 表头第一行：加粗、水平垂直居中、换行；仅 QC checklist-index 为浅绿，其余浅蓝；细黑边框；行高适应多行标题。"""
+    ws.row_dimensions[1].height = 68
     for c, text in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=c)
         cell.value = text
         cell.font = HEADER_FONT
         cell.alignment = HEADER_ALIGN
-        cell.fill = FILL_LIGHT_GREEN if c == 3 else FILL_LIGHT_BLUE
+        cell.border = HEADER_BORDER
+        is_green = "QC checklist-index" in (text or "")
+        cell.fill = FILL_LIGHT_GREEN if is_green else FILL_LIGHT_BLUE
+
+
+def _set_data_row_borders(ws, num_cols: int):
+    """从第 2 行起所有单元格设置黑色细边框。"""
+    for r in range(2, ws.max_row + 1):
+        for c in range(1, num_cols + 1):
+            ws.cell(row=r, column=c).border = THIN_BLACK_BORDER
 
 
 def write_qct_workbook(sdtm_rows: list, adam_tfl_rows: list, path: str, pdt_path: str = None, event_value: str = "", export_mode: str = "initial"):
-    """将内存中的两个 Sheet 行数据写入 Excel。两 Sheet 第一列（A）为 Event，后 9 列为 QCT 内容；含 List 表。
+    """将内存中的两个 Sheet 行数据写入 Excel。两 Sheet 第一列（A）为 Event，后 10 列为 QCT 内容；含 List 表。
     export_mode:
       - "initial"（初版QCT）: 所有行 A 列统一使用 event_value
       - "append"（新增Event）: 若行本身带 Event（row[EVENT_COL_INDEX] 非空）则使用该值；否则回退使用 event_value。"""
@@ -259,6 +323,7 @@ def write_qct_workbook(sdtm_rows: list, adam_tfl_rows: list, path: str, pdt_path
     ws_sdtm = wb.active
     ws_sdtm.title = SHEET_SDTM
     _set_qct_header_row(ws_sdtm, header_sdtm)
+    # SDTM 不写 C 列（QC checklist-index），即 row[1] 跳过
     for row in sdtm_rows:
         if use_single_event:
             ev = event_value or ""
@@ -267,9 +332,11 @@ def write_qct_workbook(sdtm_rows: list, adam_tfl_rows: list, path: str, pdt_path
             if len(row) > EVENT_COL_INDEX:
                 row_event = (row[EVENT_COL_INDEX] or "").strip()
             ev = row_event or (event_value or "")
-        ws_sdtm.append([ev] + row[:QCT_NUM_COLUMNS])
-    for i, w in enumerate(QCT_COL_WIDTHS, start=1):
+        sdtm_row_data = [ev] + row[0:1] + row[2:QCT_NUM_COLUMNS]
+        ws_sdtm.append(sdtm_row_data)
+    for i, w in enumerate(QCT_COL_WIDTHS_SDTM, start=1):
         ws_sdtm.column_dimensions[get_column_letter(i)].width = w
+    _set_data_row_borders(ws_sdtm, num_cols=len(header_sdtm))
 
     ws_adam = wb.create_sheet(title=SHEET_ADAM_TFL)
     _set_qct_header_row(ws_adam, header_adam)
@@ -284,24 +351,25 @@ def write_qct_workbook(sdtm_rows: list, adam_tfl_rows: list, path: str, pdt_path
         ws_adam.append([ev] + row[:QCT_NUM_COLUMNS])
     for i, w in enumerate(QCT_COL_WIDTHS, start=1):
         ws_adam.column_dimensions[get_column_letter(i)].width = w
+    _set_data_row_borders(ws_adam, num_cols=len(header_adam))
 
-    # List 表：第一行浅蓝；A 列 Event 选项；B 列 Final Status 选项；C 列从 PDT Users 表第一列读取
+    # List 表：表头 + A 列 Event 选项 + B 列 Final Status + C 列 User List（来自 PDT Users）
     ws_list = wb.create_sheet(title=SHEET_LIST_NAME)
+    ws_list.row_dimensions[1].height = 40
     for c, text in enumerate(LIST_HEADERS, start=1):
         cell = ws_list.cell(row=1, column=c)
         cell.value = text
         cell.font = HEADER_FONT
         cell.alignment = HEADER_ALIGN
         cell.fill = FILL_LIGHT_BLUE
+        cell.border = THIN_BLACK_BORDER
     for i, w in enumerate(LIST_COL_WIDTHS, start=1):
         ws_list.column_dimensions[get_column_letter(i)].width = w
     # A 列（Event）展示选项：CSR, Dryrun, IA, DMC, EOP2
     for r, opt in enumerate(EVENT_OPTIONS_LIST, start=2):
         ws_list.cell(row=r, column=1, value=opt)
-    # B 列（Final Status for Findings）展示三行内容：Open, Closed, Follow up
     for r, opt in enumerate(FINAL_STATUS_OPTIONS_LIST, start=2):
         ws_list.cell(row=r, column=2, value=opt)
-    # C 列（User List）从 PDT Users 表第一列填入
     user_list = _read_users_from_pdt(pdt_path) if pdt_path else []
     for r, user in enumerate(user_list, start=2):
         ws_list.cell(row=r, column=3, value=user)
@@ -312,19 +380,19 @@ def write_qct_workbook(sdtm_rows: list, adam_tfl_rows: list, path: str, pdt_path
     dv_event.add("A2:A1000")
     ws_sdtm.add_data_validation(dv_event)
     ws_adam.add_data_validation(dv_event)
-    # 「Final Status if Findings」列（I 列，因首列插入了 Event）
     list_ref = f"{SHEET_LIST_NAME}!$B$2:$B$4"
-    dv_final = DataValidation(type="list", formula1=list_ref, allow_blank=True)
-    dv_final.add("I2:I1000")
-    ws_sdtm.add_data_validation(dv_final)
-    ws_adam.add_data_validation(dv_final)
-    # F、G 列（User List 下拉，原 E、F 列顺延）
+    dv_final_sdtm = DataValidation(type="list", formula1=list_ref, allow_blank=True)
+    dv_final_sdtm.add("I2:I1000")
+    ws_sdtm.add_data_validation(dv_final_sdtm)
+    dv_final_adam = DataValidation(type="list", formula1=list_ref, allow_blank=True)
+    dv_final_adam.add("J2:J1000")
+    ws_adam.add_data_validation(dv_final_adam)
     if user_list:
         last_row = 1 + len(user_list)
         user_ref = f"{SHEET_LIST_NAME}!$C$2:$C${last_row}"
         dv_user_sdtm = DataValidation(type="list", formula1=user_ref, allow_blank=True)
+        dv_user_sdtm.add("E2:E1000")
         dv_user_sdtm.add("F2:F1000")
-        dv_user_sdtm.add("G2:G1000")
         ws_sdtm.add_data_validation(dv_user_sdtm)
         dv_user_adam = DataValidation(type="list", formula1=user_ref, allow_blank=True)
         dv_user_adam.add("F2:F1000")

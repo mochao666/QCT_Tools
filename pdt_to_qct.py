@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-从 PDT 文件生成 QCT 文件，实现 PDT 与 QCT 联动。
+命令行：从 PDT 文件生成 QCT 文件（仅两 Sheet 数据，无 List/数据验证）。
 用法示例：
-  python pdt_to_qct.py "path/to/PDT_Study123.xlsx" --output "HRxxxxx_xxx_CSR_01_QCT_v1.0_Template.xlsx"
-  python pdt_to_qct.py "path/to/PDT.xlsx"  # 输出到同目录下自动命名的 QCT 文件
+  python pdt_to_qct.py "path/to/PDT_Study123.xlsx"
+  python pdt_to_qct.py "path/to/PDT.xlsx" -o "output_QCT.xlsx" -t "template.xlsx"
 """
 
 import argparse
@@ -24,8 +24,12 @@ from pdt_reader import read_and_clean_pdt
 from qct_template import create_empty_qct_workbook
 
 
+# ---------------------------------------------------------------------------
+# 单元格与行转换
+# ---------------------------------------------------------------------------
+
 def _normalize_cell_value(val):
-    """将单元格值转为适合写入 QCT 的形式（日期格式化为 YYYY-MM-DD）。"""
+    """将单元格值转为字符串；空/NaN 为 ''，日期格式化为 YYYY-MM-DD。"""
     if pd.isna(val):
         return ""
     if isinstance(val, (pd.Timestamp, datetime)):
@@ -34,26 +38,27 @@ def _normalize_cell_value(val):
 
 
 def _row_to_qct_values(headers_config, row: pd.Series) -> list:
-    """根据 (QCT列名, PDT列名) 配置和 PDT 的一行，生成 QCT 该行各列的值。"""
+    """根据 (QCT列名, PDT列名) 配置，将 PDT 一行转为 QCT 一行 10 列值。"""
     values = []
     for qct_col, pdt_col in headers_config:
         if pdt_col is None:
             values.append("")
         else:
-            val = _normalize_cell_value(row.get(pdt_col))
-            values.append(val)
+            values.append(_normalize_cell_value(row.get(pdt_col)))
     return values
 
 
 def build_output_path(pdt_path: str, output_path: str = None) -> str:
-    """若未指定输出路径，则根据 PDT 路径生成默认 QCT 文件名。"""
+    """未指定输出路径时，在 PDT 同目录下生成「原文件名_QCT_Template.xlsx」。"""
     if output_path:
         return output_path
     base = os.path.splitext(os.path.basename(pdt_path))[0]
-    # 可选：从 base 解析 study 等生成 HRxxxxx_xxx_CSR_01_QCT_v1.0_Template.xlsx
-    dirname = os.path.dirname(pdt_path)
-    return os.path.join(dirname, f"{base}_QCT_Template.xlsx")
+    return os.path.join(os.path.dirname(pdt_path), f"{base}_QCT_Template.xlsx")
 
+
+# ---------------------------------------------------------------------------
+# 主逻辑：PDT -> QCT 写入
+# ---------------------------------------------------------------------------
 
 def generate_qct(
     pdt_path: str,
@@ -61,10 +66,8 @@ def generate_qct(
     qct_template_path: str = None,
 ) -> str:
     """
-    从 PDT 生成 QCT 文件。
-    - pdt_path: PDT Excel 路径
-    - output_path: 输出 QCT 路径，为空则自动生成
-    - qct_template_path: 可选；若提供则从该模板加载（仅用表头），否则内存创建表头
+    从 PDT 生成 QCT：读取 PDT、按 Output Type 分 Sheet 写入行数据。
+    qct_template_path 若提供则用该工作簿的 SDTM/ADaM 表头，否则用 create_empty_qct_workbook。
     返回生成的 QCT 文件路径。
     """
     pdt_clean = read_and_clean_pdt(pdt_path)
@@ -82,16 +85,16 @@ def generate_qct(
     for _, row in pdt_clean.iterrows():
         output_type = str(row.get("Output Type", "")).strip().upper()
         if output_type == OUTPUT_TYPE_SDTM:
-            values = _row_to_qct_values(QCT_HEADERS_SDTM, row)
-            ws_sdtm.append(values)
+            ws_sdtm.append(_row_to_qct_values(QCT_HEADERS_SDTM, row))
         else:
-            # ADaM 或 TFL 等均写入第二个 Sheet
-            values = _row_to_qct_values(QCT_HEADERS_ADAM_TFL, row)
-            ws_adam.append(values)
-
+            ws_adam.append(_row_to_qct_values(QCT_HEADERS_ADAM_TFL, row))
     wb.save(out_path)
     return out_path
 
+
+# ---------------------------------------------------------------------------
+# 命令行入口
+# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
